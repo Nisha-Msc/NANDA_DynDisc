@@ -1,0 +1,12 @@
+{
+  "name": "legentpro-mcp-root",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "cd A2A/js && npm install --legacy-peer-deps",
+    "start": "cd A2A/js && npx tsx src/mcp/server-sse.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
