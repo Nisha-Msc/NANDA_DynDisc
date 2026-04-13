@@ -1,0 +1,15 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacksPlan": {
+      "providers": ["node"]
+    },
+    "watchPatterns": ["A2A/js/**"]
+  },
+  "deploy": {
+    "startCommand": "cd A2A/js && npm install --legacy-peer-deps && npx tsx src/mcp/server-sse.ts",
+    "healthcheckPath": "/health",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
