@@ -1,28 +1,22 @@
 // ================= AGENT CARD TOOLS — MCP TOOLS 12 & 13 =================
-// (numbered 15 conceptually but registered as Tools 12 and 13 in server-sse.ts —
-//  ordering matters for tool registration; "Tool 15" was a planning name only)
+// HTTP-GET passthroughs to the live A2A agents on AWS to expose their agent cards.
 //
-// HTTP-GET passthroughs to the live A2A agents on AWS to expose their agent
-// cards (LEI, KERI delegation chain, OOBI URLs, verification path) to MCP
-// clients like OpenClaw.
-//
-// AWS endpoints:
-//   - Buyer  (Tommy Hilfiger):  http://54.84.215.140:9090/.well-known/agent-card.json
-//   - Seller (Jupiter Knitting): http://54.84.215.140:8080/.well-known/agent-card.json
-//
-// Override via BUYER_AGENT_URL / SELLER_AGENT_URL env vars.
-//
-// IPv4 fix: Node 18+ fetch tries IPv6 first by default. On Railway's container,
-// outbound IPv6 connections to AWS hosts can hang or fail silently before
-// falling back to IPv4. We use Node's built-in http module with family:4 to
-// force IPv4 and avoid the failure mode that produces http_status: 0.
+// IPv4 fix v2: Use undici directly with family:4 to avoid Node fetch's IPv6
+// preference + keep-alive complications that caused 30s hangs from Railway.
 
-import * as http from "node:http";
-import { URL } from "node:url";
+import { Agent, request as undiciRequest } from "undici";
 
 const BUYER_AGENT_URL  = process.env.BUYER_AGENT_URL  ?? "http://54.84.215.140:9090";
 const SELLER_AGENT_URL = process.env.SELLER_AGENT_URL ?? "http://54.84.215.140:8080";
 const FETCH_TIMEOUT_MS = 30000;
+
+// IPv4-only dispatcher with no keep-alive — eliminates two known fail modes
+const ipv4Dispatcher = new Agent({
+  connect:           { family: 4 },
+  pipelining:        0,
+  keepAliveTimeout:  1,
+  keepAliveMaxTimeout: 1,
+});
 
 export interface AgentCardResult {
   source:       "Tommy Hilfiger Buyer Agent (AWS)" | "Jupiter Knitting Seller Agent (AWS)";
@@ -48,36 +42,6 @@ function nowISO(): string {
   return new Date().toISOString();
 }
 
-// IPv4-forced HTTP GET. Returns { status, body } or throws on network error / timeout.
-function httpGetIPv4(rawUrl: string, timeoutMs: number): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const u = new URL(rawUrl);
-    const options: http.RequestOptions = {
-      hostname: u.hostname,
-      port:     u.port || "80",
-      path:     u.pathname + u.search,
-      method:   "GET",
-      family:   4,                                 // force IPv4 — fixes Railway -> AWS hang
-      headers:  { Accept: "application/json" },
-    };
-
-    const req = http.request(options, (res) => {
-      let data = "";
-      res.setEncoding("utf8");
-      res.on("data",  (chunk) => { data += chunk; });
-      res.on("end",   () => resolve({ status: res.statusCode ?? 0, body: data }));
-      res.on("error", reject);
-    });
-
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
-    });
-
-    req.on("error", reject);
-    req.end();
-  });
-}
-
 async function fetchAgentCard(
   url: string,
   source: AgentCardResult["source"],
@@ -85,32 +49,39 @@ async function fetchAgentCard(
   const endpoint = `${url}/.well-known/agent-card.json`;
 
   try {
-    const { status, body } = await httpGetIPv4(endpoint, FETCH_TIMEOUT_MS);
+    const { statusCode, body } = await undiciRequest(endpoint, {
+      method:          "GET",
+      headers:         { Accept: "application/json", Connection: "close" },
+      dispatcher:      ipv4Dispatcher,
+      headersTimeout:  FETCH_TIMEOUT_MS,
+      bodyTimeout:     FETCH_TIMEOUT_MS,
+    });
 
-    if (status < 200 || status >= 300) {
+    const text = await body.text();
+
+    if (statusCode < 200 || statusCode >= 300) {
       return {
         source,
         endpoint,
         fetched_at:  nowISO(),
-        http_status: status,
-        error:       `Agent card unreachable: HTTP ${status}`,
+        http_status: statusCode,
+        error:       `Agent card unreachable: HTTP ${statusCode}`,
       };
     }
 
     let card: any = null;
-    try { card = JSON.parse(body); } catch { card = null; }
+    try { card = JSON.parse(text); } catch { card = null; }
 
     if (!card) {
       return {
         source,
         endpoint,
         fetched_at:  nowISO(),
-        http_status: status,
+        http_status: statusCode,
         error:       `Agent card body was not valid JSON`,
       };
     }
 
-    // Extract the high-value parts so judges can see them at a glance.
     const ext   = card.extensions ?? {};
     const ident = ext.gleifIdentity ?? {};
     const meta  = ext.vLEImetadata  ?? {};
@@ -121,7 +92,7 @@ async function fetchAgentCard(
       source,
       endpoint,
       fetched_at:  nowISO(),
-      http_status: status,
+      http_status: statusCode,
       card,
       highlights: {
         legal_entity_name:  ident.legalEntityName ?? "—",
@@ -137,7 +108,8 @@ async function fetchAgentCard(
     };
 
   } catch (err: any) {
-    const isTimeout = (err?.message ?? "").includes("timed out");
+    const msg = err?.message ?? String(err);
+    const isTimeout = msg.toLowerCase().includes("timeout") || err?.code === "UND_ERR_HEADERS_TIMEOUT" || err?.code === "UND_ERR_BODY_TIMEOUT";
     return {
       source,
       endpoint,
@@ -145,7 +117,7 @@ async function fetchAgentCard(
       http_status: 0,
       error: isTimeout
         ? `Agent card request timed out after ${FETCH_TIMEOUT_MS}ms`
-        : `Agent card request failed: ${err?.message ?? String(err)}`,
+        : `Agent card request failed: ${msg}`,
     };
   }
 }
