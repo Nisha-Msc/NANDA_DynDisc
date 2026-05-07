@@ -14,7 +14,7 @@
 
 const BUYER_AGENT_URL  = process.env.BUYER_AGENT_URL  ?? "http://54.84.215.140:9090";
 const SELLER_AGENT_URL = process.env.SELLER_AGENT_URL ?? "http://54.84.215.140:8080";
-const FETCH_TIMEOUT_MS = 8000;
+const FETCH_TIMEOUT_MS = 30000;
 
 export interface AgentCardResult {
   source:       "Tommy Hilfiger Buyer Agent (AWS)" | "Jupiter Knitting Seller Agent (AWS)";
