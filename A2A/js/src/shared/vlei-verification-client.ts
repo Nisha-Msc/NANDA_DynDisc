@@ -70,7 +70,7 @@ export interface AgentVerificationMetadata {
 // ── Default config ───────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG: VLEIConfig = {
-  verificationServiceUrl: "http://localhost:4000",
+  verificationServiceUrl: process.env.VLEI_API_URL ?? "http://localhost:4000",
   enabled:                true,
   timeoutMs:              30000,   // 30 seconds — DEEP scripts run through Docker
 };

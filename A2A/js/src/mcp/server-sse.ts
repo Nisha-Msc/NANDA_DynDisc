@@ -1,6 +1,5 @@
 // ================= MCP SERVER — SSE TRANSPORT =================
-// Same 9 tools as server.ts, but exposed over HTTP/SSE instead of stdio.
-// This is for remote access: NEST deployment, OpenClaw, or any HTTP-based MCP client.
+// 13 tools exposed over HTTP/SSE for remote access (NEST/OpenClaw/HTTP-based MCP clients).
 //
 // Usage:
 //   npx tsx src/mcp/server-sse.ts
@@ -20,6 +19,9 @@ import { handleSubmitActus } from "./tools/actus-tools.js";
 import { handleGetDDSummary } from "./tools/summary-tools.js";
 import { handleNegotiate } from "./tools/negotiate-tools.js";
 import { handleVerifyAgent, handleGetMarketData, handleGetDelegationStatus } from "./tools/vlei-market-tools.js";
+import { handleLookupGleifEntity, LookupGleifEntitySchema } from "./tools/gleif-tools.js";
+import { handleConsultTreasury } from "./tools/treasury-tools.js";
+import { handleGetBuyerAgentCard, handleGetSellerAgentCard } from "./tools/agent-card-tools.js";
 import { sessionMemory } from "./session-memory.js";
 
 // Railway sets PORT automatically. Locally defaults to 3100.
@@ -37,7 +39,7 @@ function addDays(isoDate: string, days: number): string {
   return d.toISOString().split("T")[0];
 }
 
-// ── Register all 9 tools on a new McpServer instance ──────────────────────────
+// ── Register all 10 tools on a new McpServer instance ─────────────────────────
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -242,7 +244,10 @@ function createServer(): McpServer {
   // Tool 8: get_market_data
   server.tool(
     "get_market_data",
-    "Fetch real-time market data: SOFR rate, cotton price, adjusted safety factor and margin.",
+    "Fetch real-time market data: SOFR rate from Federal Reserve FRED API, ICE Cotton #2 " +
+    "futures from Yahoo Finance, USD/INR FX rate from FRED. Returns the current snapshot " +
+    "plus a commodity-adjusted margin price and SOFR-adjusted safety factor for use in " +
+    "downstream negotiation and dynamic-discounting decisions.",
     {},
     async () => {
       try {
@@ -263,6 +268,105 @@ function createServer(): McpServer {
       try {
         const result = await handleGetDelegationStatus();
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: !result.success };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 10: lookup_gleif_entity
+  server.tool(
+    "lookup_gleif_entity",
+    "Look up a legal entity in the GLEIF Global LEI Index (the global registry of " +
+    "legal entities recognized by financial regulators worldwide). Returns entity status, " +
+    "registration status, legal form, country, and addresses. Use this as the FIRST step " +
+    "in any procurement deal to confirm both buyer and seller are real registered companies. " +
+    "Provide the company's legal name (REQUIRED). LEI and country are OPTIONAL but improve " +
+    "match accuracy. Source: api.gleif.org (public, no auth, citable).",
+    LookupGleifEntitySchema.shape,
+    async (input) => {
+      try {
+        const result = await handleLookupGleifEntity(input);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 11: consult_treasury
+  server.tool(
+    "consult_treasury",
+    "Consult JUPITER KNITTING COMPANY's Treasury Agent (delegated from Chief Sales Officer via vLEI) " +
+    "for cash-flow approval on a proposed deal. The treasury agent runs a real ACTUS PAM cash-flow " +
+    "simulation against current liquidity and returns: approval/rejection decision, NPV of the deal, " +
+    "net profit (after working-capital financing cost), projected minimum cash balance, and a full " +
+    "ACTUS event schedule (production outflow + invoice collection). Call this BEFORE accepting a " +
+    "large purchase order to verify the deal won't breach Jupiter's safety threshold. " +
+    "Source: Live Jupiter Treasury Agent on AWS (real ACTUS PAM, real cash flow model).",
+    {
+      negotiation_id: z.string().describe("Negotiation/deal identifier"),
+      price_per_unit: z.number().positive().describe("Price per unit in INR"),
+      quantity:       z.number().positive().describe("Number of units"),
+      payment_terms:  z.number().int().positive().optional().describe("Payment terms in days (default 30)"),
+      round:          z.number().int().positive().optional().describe("Negotiation round (default 1)"),
+    },
+    async (input) => {
+      try {
+        const result = await handleConsultTreasury({
+          negotiationId: input.negotiation_id,
+          pricePerUnit:  input.price_per_unit,
+          quantity:      input.quantity,
+          paymentTerms:  input.payment_terms,
+          round:         input.round,
+        });
+        const isError = result.error != null || result.http_status === 0;
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 12: get_buyer_agent_card
+  server.tool(
+    "get_buyer_agent_card",
+    "Fetch the live A2A agent card for the Tommy Hilfiger Buyer Agent on AWS. " +
+    "Returns the full agent card JSON plus a 'highlights' summary that surfaces the cryptographic " +
+    "trust chain: Tommy's LEI, KERI agent identifiers (AIDs), the verified vLEI delegation path " +
+    "(GLEIF ROOT → QVI → Tommy Hilfiger Europe B.V. → Chief Procurement Officer → buyer agent), " +
+    "OOR holder, and verification status. Use this to PROVE that the buyer agent is cryptographically " +
+    "delegated from a real, named human officer at a real GLEIF-registered legal entity. " +
+    "Source: Live A2A agent at http://54.84.215.140:9090 (override via BUYER_AGENT_URL).",
+    {},
+    async () => {
+      try {
+        const result = await handleGetBuyerAgentCard();
+        const isError = result.error != null || result.http_status === 0;
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool 13: get_seller_agent_card
+  server.tool(
+    "get_seller_agent_card",
+    "Fetch the live A2A agent card for the Jupiter Knitting Seller Agent on AWS. " +
+    "Returns the full agent card JSON plus a 'highlights' summary surfacing Jupiter's LEI, " +
+    "KERI agent identifiers, and the verified vLEI delegation path " +
+    "(GLEIF ROOT → QVI → Jupiter Knitting Company → Chief Sales Officer → seller agent). " +
+    "Use this together with get_buyer_agent_card and lookup_gleif_entity to demonstrate the " +
+    "end-to-end accountability chain from the global legal-entity registry down to the autonomous " +
+    "agents acting on behalf of the firms. " +
+    "Source: Live A2A agent at http://54.84.215.140:8080 (override via SELLER_AGENT_URL).",
+    {},
+    async () => {
+      try {
+        const result = await handleGetSellerAgentCard();
+        const isError = result.error != null || result.http_status === 0;
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
       }
@@ -311,7 +415,7 @@ app.get("/health", (req, res) => {
     status: "ok",
     server: "dynd-disc-server",
     version: "2.0.0",
-    tools: 9,
+    tools: 13,
     transport: "SSE",
     timestamp: new Date().toISOString(),
   });
@@ -321,6 +425,11 @@ app.listen(PORT, "0.0.0.0", () => {
   console.error(`[DynDisc MCP-SSE] Server running on http://0.0.0.0:${PORT}`);
   console.error(`[DynDisc MCP-SSE] SSE endpoint: http://0.0.0.0:${PORT}/sse`);
   console.error(`[DynDisc MCP-SSE] Health check: http://0.0.0.0:${PORT}/health`);
-  console.error(`[DynDisc MCP-SSE] 9 tools + session memory`);
-  console.error(`[DynDisc MCP-SSE] ACTUS: ${process.env.ACTUS_URL ?? "http://34.203.247.32:8083"}`);
+  console.error(`[DynDisc MCP-SSE] 13 tools + session memory`);
+  console.error(`[DynDisc MCP-SSE] ACTUS:    ${process.env.ACTUS_URL ?? "http://34.203.247.32:8083"}`);
+  console.error(`[DynDisc MCP-SSE] vLEI:     ${process.env.VLEI_API_URL ?? "http://localhost:4000 (DEFAULT — set VLEI_API_URL on Railway)"}`);
+  console.error(`[DynDisc MCP-SSE] Treasury: ${process.env.TREASURY_AGENT_URL ?? "http://54.84.215.140:7070 (default)"}`);
+  console.error(`[DynDisc MCP-SSE] Buyer:    ${process.env.BUYER_AGENT_URL  ?? "http://54.84.215.140:9090 (default)"}`);
+  console.error(`[DynDisc MCP-SSE] Seller:   ${process.env.SELLER_AGENT_URL ?? "http://54.84.215.140:8080 (default)"}`);
+  console.error(`[DynDisc MCP-SSE] GLEIF:    https://api.gleif.org/api/v1 (public, no auth)`);
 });
