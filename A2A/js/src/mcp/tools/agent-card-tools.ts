@@ -10,11 +10,10 @@ const BUYER_AGENT_URL  = process.env.BUYER_AGENT_URL  ?? "http://54.84.215.140:9
 const SELLER_AGENT_URL = process.env.SELLER_AGENT_URL ?? "http://54.84.215.140:8080";
 const FETCH_TIMEOUT_MS = 30000;
 
-// IPv4-only dispatcher with no keep-alive — eliminates two known fail modes
 const ipv4Dispatcher = new Agent({
-  connect:           { family: 4 },
-  pipelining:        0,
-  keepAliveTimeout:  1,
+  connect:             { family: 4 },
+  pipelining:          0,
+  keepAliveTimeout:    1,
   keepAliveMaxTimeout: 1,
 });
 
@@ -50,11 +49,11 @@ async function fetchAgentCard(
 
   try {
     const { statusCode, body } = await undiciRequest(endpoint, {
-      method:          "GET",
-      headers:         { Accept: "application/json", Connection: "close" },
-      dispatcher:      ipv4Dispatcher,
-      headersTimeout:  FETCH_TIMEOUT_MS,
-      bodyTimeout:     FETCH_TIMEOUT_MS,
+      method:         "GET",
+      headers:        { Accept: "application/json", Connection: "close" },
+      dispatcher:     ipv4Dispatcher,
+      headersTimeout: FETCH_TIMEOUT_MS,
+      bodyTimeout:    FETCH_TIMEOUT_MS,
     });
 
     const text = await body.text();
@@ -109,7 +108,9 @@ async function fetchAgentCard(
 
   } catch (err: any) {
     const msg = err?.message ?? String(err);
-    const isTimeout = msg.toLowerCase().includes("timeout") || err?.code === "UND_ERR_HEADERS_TIMEOUT" || err?.code === "UND_ERR_BODY_TIMEOUT";
+    const isTimeout = msg.toLowerCase().includes("timeout")
+      || err?.code === "UND_ERR_HEADERS_TIMEOUT"
+      || err?.code === "UND_ERR_BODY_TIMEOUT";
     return {
       source,
       endpoint,
