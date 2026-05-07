@@ -11,6 +11,14 @@
 //   - Seller (Jupiter Knitting): http://54.84.215.140:8080/.well-known/agent-card.json
 //
 // Override via BUYER_AGENT_URL / SELLER_AGENT_URL env vars.
+//
+// IPv4 fix: Node 18+ fetch tries IPv6 first by default. On Railway's container,
+// outbound IPv6 connections to AWS hosts can hang or fail silently before
+// falling back to IPv4. We use Node's built-in http module with family:4 to
+// force IPv4 and avoid the failure mode that produces http_status: 0.
+
+import * as http from "node:http";
+import { URL } from "node:url";
 
 const BUYER_AGENT_URL  = process.env.BUYER_AGENT_URL  ?? "http://54.84.215.140:9090";
 const SELLER_AGENT_URL = process.env.SELLER_AGENT_URL ?? "http://54.84.215.140:8080";
@@ -40,36 +48,70 @@ function nowISO(): string {
   return new Date().toISOString();
 }
 
+// IPv4-forced HTTP GET. Returns { status, body } or throws on network error / timeout.
+function httpGetIPv4(rawUrl: string, timeoutMs: number): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(rawUrl);
+    const options: http.RequestOptions = {
+      hostname: u.hostname,
+      port:     u.port || "80",
+      path:     u.pathname + u.search,
+      method:   "GET",
+      family:   4,                                 // force IPv4 — fixes Railway -> AWS hang
+      headers:  { Accept: "application/json" },
+    };
+
+    const req = http.request(options, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data",  (chunk) => { data += chunk; });
+      res.on("end",   () => resolve({ status: res.statusCode ?? 0, body: data }));
+      res.on("error", reject);
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 async function fetchAgentCard(
   url: string,
   source: AgentCardResult["source"],
 ): Promise<AgentCardResult> {
   const endpoint = `${url}/.well-known/agent-card.json`;
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(endpoint, {
-      headers: { Accept: "application/json" },
-      signal:  controller.signal,
-    });
-    clearTimeout(tid);
+    const { status, body } = await httpGetIPv4(endpoint, FETCH_TIMEOUT_MS);
 
-    let card: any = null;
-    try { card = await resp.json(); } catch { card = null; }
-
-    if (!resp.ok || !card) {
+    if (status < 200 || status >= 300) {
       return {
         source,
         endpoint,
         fetched_at:  nowISO(),
-        http_status: resp.status,
-        error:       `Agent card unreachable: HTTP ${resp.status}`,
+        http_status: status,
+        error:       `Agent card unreachable: HTTP ${status}`,
+      };
+    }
+
+    let card: any = null;
+    try { card = JSON.parse(body); } catch { card = null; }
+
+    if (!card) {
+      return {
+        source,
+        endpoint,
+        fetched_at:  nowISO(),
+        http_status: status,
+        error:       `Agent card body was not valid JSON`,
       };
     }
 
     // Extract the high-value parts so judges can see them at a glance.
-    const ext  = card.extensions ?? {};
+    const ext   = card.extensions ?? {};
     const ident = ext.gleifIdentity ?? {};
     const meta  = ext.vLEImetadata  ?? {};
     const keri  = ext.keriIdentifiers ?? {};
@@ -79,7 +121,7 @@ async function fetchAgentCard(
       source,
       endpoint,
       fetched_at:  nowISO(),
-      http_status: resp.status,
+      http_status: status,
       card,
       highlights: {
         legal_entity_name:  ident.legalEntityName ?? "—",
@@ -93,16 +135,17 @@ async function fetchAgentCard(
         gleif_endpoint:     gleif.gleifVerificationEndpoint ?? "—",
       },
     };
+
   } catch (err: any) {
-    clearTimeout(tid);
+    const isTimeout = (err?.message ?? "").includes("timed out");
     return {
       source,
       endpoint,
       fetched_at:  nowISO(),
       http_status: 0,
-      error: err?.name === "AbortError"
+      error: isTimeout
         ? `Agent card request timed out after ${FETCH_TIMEOUT_MS}ms`
-        : (err?.message ?? String(err)),
+        : `Agent card request failed: ${err?.message ?? String(err)}`,
     };
   }
 }
